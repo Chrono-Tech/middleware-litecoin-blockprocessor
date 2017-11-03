@@ -57,6 +57,7 @@ Below is the expamle configuration:
 ```
 MONGO_URI=mongodb://localhost:27017/data
 RABBIT_URI=amqp://localhost:5672
+RABBIT_SERVICE_NAME=app_litecoin
 MONGO_COLLECTION_PREFIX=litecoin
 NETWORK=regtest
 DB_DRIVER=leveldb

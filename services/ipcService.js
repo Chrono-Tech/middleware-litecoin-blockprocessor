@@ -1,0 +1,77 @@
+const ipc = require('node-ipc'),
+  config = require('../config'),
+  path = require('path'),
+  fs = require('fs'),
+  _ = require('lodash'),
+  RPCBase = require('lcoin/lib/http/rpcbase');
+
+Object.assign(ipc.config, {
+  id: config.node.ipcName,
+  socketRoot: config.node.ipcPath,
+  retry: 1500,
+  maxConnections: 100,
+  sync: false,
+  silent: true,
+  unlink: false
+});
+
+/**
+ * @service
+ * @description expose ipc RPC interface for other services
+ * @param node - litecoin node's instance
+ * @returns {Promise.<*>}
+ */
+
+
+const init = async node => {
+
+  let pathIpc = path.join(config.node.ipcPath, `${ipc.config.appspace}${config.node.ipcName}`);
+
+  if (fs.existsSync(pathIpc)) {
+    fs.unlinkSync(pathIpc);
+  }
+
+  node.rpc.add('gettxbyaddress', node.getTXByAddress.bind(node));
+  node.rpc.add('getcoinsbyaddress', async (...args) => {
+    let coins = await node.getCoinsByAddress.bind(node)(...args);
+    return coins.map(coin => {
+      coin = coin.getJSON(config.node.network);
+      if (_.isString(coin.value)) { //todo bug in lcoin
+        coin.value = coin.value * Math.pow(10, 8);
+      }
+      return coin;
+    });
+  });
+  node.rpc.add('getmetabyaddress', node.getMetaByAddress.bind(node));
+
+  node.rpc.add('sendrawtransactionnotify', (...args) => {
+    node.emit('pushed_tx', _.get(args, '0.0'));
+    return node.rpc.sendRawTransaction.call(node.rpc, ...args);
+  });
+
+  ipc.serve(() => {
+      ipc.server.on('message', async (data, socket) => {
+        try {
+          data = JSON.parse(data);
+          const json = await node.rpc.execute(data);
+
+          ipc.server.emit(socket, 'message', {result: json, id: data.id});
+        } catch (e) {
+          ipc.server.emit(socket, 'message', {
+              result: null,
+              error: {
+                message: 'Invalid request.',
+                code: RPCBase.errors.INVALID_REQUEST
+              }
+            }
+          );
+        }
+
+      });
+    }
+  );
+
+  ipc.server.start();
+};
+
+module.exports = init;

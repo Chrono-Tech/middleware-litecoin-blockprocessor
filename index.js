@@ -5,7 +5,6 @@ const lcoin = require('lcoin'),
   amqp = require('amqplib'),
   memwatch = require('memwatch-next'),
   bunyan = require('bunyan'),
-  TX = require('lcoin/lib/primitives/tx'),
   log = bunyan.createLogger({name: 'core.blockProcessor'}),
   config = require('./config');
 
@@ -26,7 +25,7 @@ const node = new lcoin.fullnode({
 });
 
 mongoose.Promise = Promise;
-mongoose.connect(config.mongo.uri, {useMongoClient: true});
+mongoose.connect(config.mongo.accounts.uri, {useMongoClient: true});
 
 mongoose.connection.on('disconnected', function () {
   log.error('mongo disconnected!');
@@ -82,8 +81,8 @@ const init = async function () {
 
   });
 
-  node.on('pushed_tx', async (tx) => { //custom event, which fires on tx push via rest module
-    let filtered = await filterAccountsService({txs: [TX.fromRaw(tx, 'hex')]});
+  node.pool.on('tx', async (tx) => {
+    let filtered = await filterAccountsService({txs: [tx]});
     await Promise.all(filtered.map(item =>
       channel.publish('events', `${config.rabbit.serviceName}_transaction.${item.address}`, new Buffer(JSON.stringify(Object.assign(item, {block: -1}))))
     ));

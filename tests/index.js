@@ -28,7 +28,7 @@ describe('core/blockProcessor', function () {
 
     ctx.accounts.push(keyPair, keyPair2, keyPair3, keyPair4);
 
-    mongoose.connect(config.mongo.uri, {useMongoClient: true});
+    mongoose.connect(config.mongo.accounts.uri, {useMongoClient: true});
   });
 
   after(() => {
@@ -54,7 +54,7 @@ describe('core/blockProcessor', function () {
   it('validate balance again', async () => {
     let keyring = new lcoin.keyring(ctx.accounts[0].privateKey, ctx.network);
     let coins = await ipcExec('getcoinsbyaddress', [keyring.getAddress().toString()]);
-
+    
     let newSumm = _.chain(coins)
       .map(c => c.value)
       .sum()

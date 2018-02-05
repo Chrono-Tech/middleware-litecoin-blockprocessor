@@ -38,6 +38,8 @@ module.exports = {
     network: process.env.NETWORK || 'regtest',
     dbDriver: process.env.DB_DRIVER || 'memory',
     ipcName: process.env.IPC_NAME || 'litecoin',
-    ipcPath: process.env.IPC_PATH || '/tmp/'
+    ipcPath: process.env.IPC_PATH || '/tmp/',
+    cacheSize: process.env.CACHE_SIZE ? parseInt(process.env.CACHE_SIZE) : 1024,
+    coinCache: process.env.COIN_SIZE ? parseInt(process.env.COIN_SIZE) : 30000000
   }
 };

@@ -3,8 +3,7 @@ const ipc = require('node-ipc'),
   path = require('path'),
   fs = require('fs'),
   _ = require('lodash'),
-  Promise = require('bluebird'),
-  RPCBase = require('bcoin/lib/http/rpcbase');
+  RPCBase = require('lcoin/lib/http/rpcbase');
 
 Object.assign(ipc.config, {
   id: config.node.ipcName,
@@ -19,7 +18,7 @@ Object.assign(ipc.config, {
 /**
  * @service
  * @description expose ipc RPC interface for other services
- * @param node - bitcoin node's instance
+ * @param node - litecoin node's instance
  * @returns {Promise.<*>}
  */
 
@@ -45,10 +44,14 @@ const init = async node => {
   });
 
   node.rpc.add('getcoinsbyaddress', async (...args) => {
-    let coins = await node.getCoinsByAddress(...args);
-    return coins.map(coin =>
-      coin.getJSON(config.node.network)
-    );
+    let coins = await node.getCoinsByAddress.bind(node)(...args);
+    return coins.map(coin => {
+      coin = coin.getJSON(config.node.network);
+      if (_.isString(coin.value)) { //todo bug in lcoin
+        coin.value = coin.value * Math.pow(10, 8);
+      }
+      return coin;
+    });
   });
 
   node.rpc.add('getmetabyaddress', node.getMetaByAddress.bind(node));

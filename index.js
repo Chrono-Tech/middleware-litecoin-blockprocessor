@@ -21,7 +21,9 @@ const node = new lcoin.fullnode({
   spv: true,
   indexTX: true,
   indexAddress: true,
-  'log-level': 'info'
+  coinCache: config.node.coinCache,
+  cacheSize: config.node.cacheSize,
+  logLevel: 'info'
 });
 
 mongoose.Promise = Promise;

@@ -28,7 +28,14 @@ module.exports = async block => {
     .value();
 
   let filteredByChunks = await Promise.all(addresses.map(chunk =>
-    accountModel.find({address: {$in: chunk}})
+    accountModel.find({
+      address: {
+        $in: chunk
+      },
+      isActive: {
+        $ne: false
+      }
+    })
   ));
 
   return _.chain(filteredByChunks)

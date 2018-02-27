@@ -55,10 +55,6 @@ const init = async node => {
   });
   node.rpc.add('getmetabyaddress', node.getMetaByAddress.bind(node));
 
-  node.rpc.add('sendrawtransactionnotify', (...args) => {
-    return node.rpc.sendRawTransaction.call(node.rpc, ...args);
-  });
-
   ipc.serve(() => {
     ipc.server.on('message', async (data, socket) => {
       try {

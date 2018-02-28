@@ -1,12 +1,23 @@
+const mongoose = require('mongoose'),
+  config = require('./config'),
+  Promise = require('bluebird'),
+  customNetworkRegistrator = require('./networks');
+
+mongoose.Promise = Promise;
+mongoose.connect(config.mongo.data.uri, {useMongoClient: true});
+mongoose.accounts = mongoose.createConnection(config.mongo.accounts.uri, {useMongoClient: true});
+
+customNetworkRegistrator(config.node.network);
+
 const lcoin = require('lcoin'),
-  filterAccountsService = require('./services/filterAccountsService'),
   ipcService = require('./services/ipcService'),
-  mongoose = require('mongoose'),
   amqp = require('amqplib'),
+  transformBlockTxs = require('./utils/transformBlockTxs'),
+  blockCacheService = require('./services/blockCacheService'),
+  filterTxsByAccountsService = require('./services/filterTxsByAccountsService'),
   memwatch = require('memwatch-next'),
   bunyan = require('bunyan'),
-  log = bunyan.createLogger({name: 'core.blockProcessor'}),
-  config = require('./config');
+  log = bunyan.createLogger({name: 'core.blockProcessor'});
 
 /**
  * @module entry point
@@ -18,7 +29,7 @@ const node = new lcoin.fullnode({
   network: config.node.network,
   db: config.node.dbDriver,
   prefix: config.node.dbpath,
-  spv: true,
+  spv: false,
   indexTX: true,
   indexAddress: true,
   coinCache: config.node.coinCache,
@@ -26,13 +37,14 @@ const node = new lcoin.fullnode({
   logLevel: 'info'
 });
 
-mongoose.Promise = Promise;
-mongoose.connect(config.mongo.accounts.uri, {useMongoClient: true});
+const cacheService = new blockCacheService(node);
 
-mongoose.connection.on('disconnected', function () {
-  log.error('mongo disconnected!');
-  process.exit(0);
-});
+[mongoose.accounts, mongoose.connection].forEach(connection =>
+  connection.on('disconnected', function () {
+    log.error('mongo disconnected!');
+    process.exit(0);
+  })
+);
 
 const init = async function () {
   let amqpConn = await amqp.connect(config.rabbit.url)
@@ -58,42 +70,53 @@ const init = async function () {
   await node.open();
   await node.connect();
 
-  memwatch.on('leak', () => {
-    log.info('leak');
+  await cacheService.startSync();
 
-    if (!node.pool.syncing) {
+  memwatch.on('leak', async (info) => {
+    log.info('leak', info);
+
+    if (!node.pool.syncing)
       return;
-    }
 
     try {
-      node.stopSync();
+      await node.stopSync();
+      await cacheService.stopSync();
     } catch (e) {
+
     }
 
-    setTimeout(() => node.startSync(), 60000);
+    await Promise.delay(config.node.gcTimeOut);
+    await node.startSync();
+    await cacheService.startSync();
+
   });
 
-  node.on('connect', async (entry, block) => {
+  node.on('connect', async (entry) => {
     log.info('%s (%d) added to chain.', entry.rhash(), entry.height);
-    await channel.publish('events', `${config.rabbit.serviceName}_block`, new Buffer(JSON.stringify({block: entry.height})));
-    let filtered = await filterAccountsService(block);
-    await Promise.all(filtered.map(item =>
-      channel.publish('events', `${config.rabbit.serviceName}_transaction.${item.address}`, new Buffer(JSON.stringify(Object.assign(item, {block: entry.height}))))
-    ));
+  });
 
+  cacheService.events.on('block', async block => {
+    log.info('%s (%d) added to cache.', block.hash, block.number);
+    let filtered = await filterTxsByAccountsService(block.txs);
+    await Promise.all(filtered.map(item =>
+      channel.publish('events', `${config.rabbit.serviceName}_transaction.${item.address}`, new Buffer(JSON.stringify(Object.assign(item, {block: block.number}))))
+    ));
   });
 
   node.pool.on('tx', async (tx) => {
-    let filtered = await filterAccountsService({txs: [tx]});
+    if (!await cacheService.isSynced())
+      return;
+
+    const fullTx = (await transformBlockTxs(node, [tx]))[0];
+    let filtered = await filterTxsByAccountsService([fullTx]);
     await Promise.all(filtered.map(item =>
       channel.publish('events', `${config.rabbit.serviceName}_transaction.${item.address}`, new Buffer(JSON.stringify(Object.assign(item, {block: -1}))))
     ));
   });
 
-  node.on('error', err=>{
+  node.on('error', err => {
     log.error(err);
   });
-
 
   ipcService(node);
   node.startSync();

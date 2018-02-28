@@ -1,25 +1,20 @@
 const _ = require('lodash'),
-  accountModel = require('../models/accountModel'),
-  config = require('../config'),
-  Network = require('lcoin/lib/protocol/network');
+  accountModel = require('../models/accountModel');
 
 /**
  * @service
  * @description filter txs by registered addresses
- * @param block - an array of txs
+ * @param txs - an array of txs
  * @returns {Promise.<*>}
  */
 
 
-module.exports = async block => {
+module.exports = async txs => {
 
-  let network = Network.get(config.node.network);
-
-  let addresses = _.chain(block.txs)
-    .map(tx => {
-      tx = tx.getJSON(network);
-      return _.union(tx.inputs, tx.outputs);
-    })
+  let addresses = _.chain(txs)
+    .map(tx =>
+      _.union(tx.inputs, tx.outputs)
+    )
     .flattenDeep()
     .map(i => i.address || '')
     .compact()
@@ -42,17 +37,16 @@ module.exports = async block => {
     .flattenDeep()
     .map(account => ({
       address: account.address,
-      txs: _.chain(block.txs)
-        .filter(tx => {
-          tx = tx.getJSON(network);
-          return _.chain(tx.inputs)
+      txs: _.chain(txs)
+        .filter(tx =>
+          _.chain(tx.inputs)
             .union(tx.outputs)
             .flattenDeep()
             .map(i => (i.address || '').toString())
             .includes(account.address)
-            .value();
-        })
-        .map(tx => tx.toJSON().hash)
+            .value()
+        )
+        .map(tx => tx.hash)
         .value()
     })
     )

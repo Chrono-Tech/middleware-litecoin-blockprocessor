@@ -1,6 +1,5 @@
-const BN = require('bcoin/lib/crypto/bn'),
-  util = require('bcoin/lib/utils/util');
-
+const BN = require('bn.js'),
+  util = require('lcoin/lib/utils/util');
 
 const testnetv4 = {};
 
@@ -143,6 +142,5 @@ testnetv4.maxFeeRate = 60000;
 testnetv4.selfConnect = false;
 
 testnetv4.requestMempool = false;
-
 
 module.exports = testnetv4;

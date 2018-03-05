@@ -17,29 +17,79 @@ module.exports = async (node, txs) => {
 
   txs = txs.map(tx => tx.getJSON(network));
 
-  let fetchedInputs = _.chain(txs)
+  let prevouts = _.chain(txs)
     .map(tx => tx.inputs)
     .flattenDeep()
-    .map(input => _.get(input, 'prevout.hash'))
+    .map(input => _.get(input, 'prevout'))
     .compact()
     .uniq()
-    .chunk(50)
+    .chunk(200)
     .value();
 
-  fetchedInputs = await Promise.map(fetchedInputs, async inputs =>
-    await blockModel.aggregate([
-      {$match: {'txs.hash': {$in: inputs}}},
-      {$unwind: '$txs'},
-      {$match: {'txs.hash': {$in: inputs}}},
-      {$group: {_id: 'a', txs: {$addToSet: '$txs'}}}
-    ]), {concurrency: 4});
 
-  fetchedInputs = _.chain(fetchedInputs).map(inputs => _.get(inputs, '0.txs', [])).flattenDeep().value();
-  fetchedInputs = _.union(fetchedInputs, txs);
+  let fetchedPrevOuts = await Promise.map(prevouts, async prevoutSet => {
+    let hashes = prevoutSet.map(prev => prev.hash);
+    return await blockModel.aggregate([
+      {$match: {'txs.hash': {$in: hashes}}},
+      {$unwind: '$txs'},
+      {$match: {'txs.hash': {$in: hashes}}},
+      {
+        $project: {
+          items: prevoutSet,
+          outputs: {
+            $map: {
+              input: '$txs.outputs',
+              as: 'output',
+              in: {
+                value: '$$output.value',
+                address: '$$output.address',
+                hash: '$txs.hash',
+                index: {$indexOfArray: ['$txs.outputs', '$$output']}
+              }
+            }
+          }
+        }
+      },
+      {$unwind: '$items'},
+      {
+        $project: {
+          outputs: {
+            $filter: {
+              input: '$outputs',
+              as: 'output',
+              cond: {
+                $and: [
+                  {$eq: ["$$output.hash", '$items.hash']},
+                  {$eq: ["$$output.index", '$items.index']}
+                ]
+              }
+            }
+          }
+        }
+      },
+      {$unwind: '$outputs'},
+      {$group: {_id: 'a', outputs: {$addToSet: '$outputs'}}}
+    ])
+  }, {concurrency: 4});
+
+  fetchedPrevOuts = _.chain(fetchedPrevOuts).map(prev=>_.get(prev, '0.outputs', [])).flattenDeep().value();
+
+  const currentOuts = _.chain(txs)
+    .map(tx =>
+      tx.outputs.map((output, index) => ({
+        hash: tx.hash,
+        value: output.value,
+        index: index
+      }))
+    )
+    .flattenDeep()
+    .value();
+
+  fetchedPrevOuts = _.union(fetchedPrevOuts, currentOuts);
 
   return await Promise.map(txs, async tx => {
 
-    let inputs = await Promise.map(tx.inputs, async input => {
+    let inputs = await Promise.mapSeries(tx.inputs, async input => {
 
       if (!_.has(input, 'prevout.hash') || !_.has(input, 'prevout.index') || !input.address)
         return {
@@ -48,9 +98,9 @@ module.exports = async (node, txs) => {
           value: 0
         };
 
-      const fetchedInput = _.find(fetchedInputs, {hash: input.prevout.hash});
+      const fetchedPrevOut = _.find(fetchedPrevOuts, {hash: input.prevout.hash, index: input.prevout.index});
 
-      if (!fetchedInput) {
+      if (!fetchedPrevOut) {
         const tx = await node.rpc.getRawTransaction([input.prevout.hash, true]).catch(() => null);
         if (!tx)
           return null;
@@ -62,7 +112,7 @@ module.exports = async (node, txs) => {
       return {
         prevout: input.prevout,
         address: input.address,
-        value: _.get(fetchedInput, `outputs.${input.prevout.index}.value`, 0)
+        value: _.get(fetchedPrevOut, 'value', 0) * Math.pow(10, 8)
       };
     });
 
@@ -83,7 +133,7 @@ module.exports = async (node, txs) => {
       inputs: _.compact(inputs),
       outputs: tx.outputs.map(output => ({
         address: output.address,
-        value: output.value
+        value: output.value * Math.pow(10, 8)
       }))
     };
 

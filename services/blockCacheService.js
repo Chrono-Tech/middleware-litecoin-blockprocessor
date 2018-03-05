@@ -18,6 +18,7 @@ class BlockCacheService {
 
   constructor (node) {
     this.node = node;
+    this.isLocked = false;
     this.events = new EventEmitter();
     this.currentHeight = 0;
     this.lastBlocks = [];
@@ -43,7 +44,8 @@ class BlockCacheService {
     this.currentHeight = _.chain(currentBlocks).get('0.number', -1).add(1).value();
     log.info(`caching from block:${this.currentHeight} for network:${config.node.network}`);
     this.lastBlocks = _.chain(currentBlocks).map(block => block.hash).compact().reverse().value();
-    this.doJob();
+    if (!this.isLocked)
+      this.doJob();
     this.node.pool.on('tx', this.pendingTxCallback);
 
   }
@@ -52,23 +54,15 @@ class BlockCacheService {
 
     while (this.isSyncing) {
       try {
-        let block = await this.processBlock();
-        await this.processUTXO(block);
-        await blockModel.findOneAndUpdate({number: block.number}, block, {upsert: true});
-        await blockModel.update({number: -1}, {
-          $pull: {
-            txs: {
-              hash: {
-                $in: block.txs.map(tx => tx.hash)
-              }
-            }
-          }
-        });
+        this.isLocked = true;
+        let block = await Promise.resolve(this.processBlock()).timeout(60000 * 5);
+        await this.updateDbStateWithBlock(block);
 
         this.currentHeight++;
         _.pullAt(this.lastBlocks, 0);
         this.lastBlocks.push(block.hash);
         this.events.emit('block', block);
+        this.isLocked = false;
       } catch (err) {
 
         if (err.code === 0) {
@@ -79,35 +73,123 @@ class BlockCacheService {
         if (_.get(err, 'code') === 1) {
           let lastCheckpointBlock = err.block || await blockModel.findOne({hash: this.lastBlocks[0]});
           log.info(`wrong sync state!, rollback to ${lastCheckpointBlock.number - 1} block`);
-          const blocksToDelete = await blockModel.find({
-            $or: [
-              {hash: {$in: this.lastBlocks}},
-              {number: {$gte: lastCheckpointBlock.number}}
-            ]
-          });
 
-          for (let block of blocksToDelete)
-            await this.processUTXO(block, true);
-
-          await blockModel.remove({
-            $or: [
-              {hash: {$in: this.lastBlocks}},
-              {number: {$gte: lastCheckpointBlock.number}}
-            ]
-          });
+          await this.rollbackStateFromBlock(lastCheckpointBlock);
           const currentBlocks = await blockModel.find({
             network: config.node.network,
             timestamp: {$ne: 0},
             number: {$lt: lastCheckpointBlock.number}
           }).sort('-number').limit(config.consensus.lastBlocksValidateAmount);
           this.lastBlocks = _.chain(currentBlocks).map(block => block.hash).reverse().value();
-          this.currentHeight = lastCheckpointBlock.number - 1;
+          this.currentHeight = lastCheckpointBlock.number;
+
         }
 
         if (![0, 1].includes(_.get(err, 'code')))
           log.error(err);
+
+        this.isLocked = false;
       }
     }
+
+  }
+
+  async updateDbStateWithBlock (block) {
+
+    const inputs = _.chain(block.txs)
+      .map(tx => tx.inputs)
+      .flattenDeep()
+      .groupBy('prevout.hash')
+      .toPairs()
+      .map(pair => ({
+        updateOne: {
+          filter: {'txs.hash': pair[0]},
+          update: {
+            $set: _.chain(pair[1])
+              .map(input =>
+                [`txs.$.outputs.${input.prevout.index}.spent`, true]
+              )
+              .fromPairs()
+              .value()
+          }
+        }
+      }))
+      .union([
+        {
+          updateOne: {
+            filter: {number: block.number},
+            update: block,
+            upsert: true
+          }
+        },
+        {
+          updateOne: {
+            filter: {number: -1},
+            update: {
+              $pull: {
+                txs: {
+                  hash: {
+                    $in: block.txs.map(tx => tx.hash)
+                  }
+                }
+              }
+            }
+          }
+        }
+
+      ])
+      .chunk(50)
+      .value();
+
+    await Promise.map(inputs, async input => await blockModel.bulkWrite(input, {ordered: false}), {concurrency: 4});
+
+  }
+
+  async rollbackStateFromBlock (block) {
+
+    const blocksToDelete = await blockModel.find({
+      $or: [
+        {hash: {$in: this.lastBlocks}},
+        {number: {$gte: block.number}}
+      ]
+    });
+
+    const inputs = _.chain(blocksToDelete)
+      .map(block => block.txs)
+      .flattenDeep()
+      .map(tx => tx.inputs)
+      .flattenDeep()
+      .groupBy('prevout.hash')
+      .toPairs()
+      .map(pair => ({
+        updateOne: {
+          filter: {'txs.hash': pair[0]},
+          update: {
+            $set: _.chain(pair[1])
+              .map(input =>
+                [`txs.$.outputs.${input.prevout.index}.spent`, false]
+              )
+              .fromPairs()
+              .value()
+          }
+        }
+      }))
+      .union([
+        {
+          deleteMany: {
+            filter: {
+              $or: [
+                {hash: {$in: this.lastBlocks}},
+                {number: {$gte: block.number}}
+              ]
+            }
+          }
+        }
+      ])
+      .chunk(50)
+      .value();
+
+    await Promise.map(inputs, async input => await blockModel.bulkWrite(input, {ordered: false}), {concurrency: 4});
 
   }
 
@@ -117,17 +199,17 @@ class BlockCacheService {
       return;
 
     const mempool = await this.node.rpc.getRawMempool([]);
-    let currentUnconfirmedBlock = await blockModel.findOne({number: -1}) || {
+    let currentUnconfirmedBlock = await blockModel.findOne({number: -1}) || new blockModel({
         number: -1,
         hash: null,
         timestamp: 0,
         txs: []
-      };
+      });
 
     const fullTx = await transformBlockTxs(this.node, [tx]);
     let alreadyIncludedTxs = _.filter(currentUnconfirmedBlock.txs, tx => mempool.includes(tx.hash));
-    currentUnconfirmedBlock.txs = _.union(alreadyIncludedTxs, [fullTx]);
-    await blockModel.findOneAndUpdate({number: -1}, currentUnconfirmedBlock, {upsert: true});
+    currentUnconfirmedBlock.txs = _.union(alreadyIncludedTxs, fullTx);
+    await blockModel.findOneAndUpdate({number: -1}, _.omit(currentUnconfirmedBlock.toObject(), '_id', '__v'), {upsert: true});
   }
 
   async stopSync () {
@@ -146,7 +228,6 @@ class BlockCacheService {
 
     let savedBlocks = await blockModel.find({hash: {$in: lastBlockHashes}}, {number: 1}).limit(this.lastBlocks.length);
     savedBlocks = _.chain(savedBlocks).map(block => block.number).orderBy().value();
-
     const validatedBlocks = _.filter(savedBlocks, (s, i) => s === i + savedBlocks[0]);
 
     if (_.compact(lastBlockHashes).length !== this.lastBlocks.length || savedBlocks.length !== this.lastBlocks.length ||
@@ -164,21 +245,6 @@ class BlockCacheService {
       txs: txs,
       timestamp: block.time || Date.now(),
     };
-  }
-
-  async processUTXO (block, fallback = false) {
-
-    const inputs = _.chain(block.txs)
-      .map(tx => tx.inputs)
-      .flattenDeep()
-      .map(input => input.prevout)
-      .value();
-
-    return await Promise.all(inputs.map(async input =>
-        await blockModel.update({'txs.hash': input.hash}, {$set: {[`txs.$.outputs.${input.index}.spent`]: !fallback}})
-      )
-    )
-
   }
 
   async indexCollection () {
